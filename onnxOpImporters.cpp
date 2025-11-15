@@ -3053,7 +3053,7 @@ DEFINE_BUILTIN_OP_IMPORTER(SimplifiedLayerNormalization)
                                                                       : N_CHECK(biasLayer->getOutput(0));
 
     OnnxAttrs attrs(node, ctx);
-    float epsilon = attrs.get("epsilon", 1e-5f);
+    static float epsilon = attrs.get("epsilon", 1e-5f);
     int32_t axis = attrs.get("axis", -1);
     nvinfer1::DataType computeType = nvinfer1::DataType::kFLOAT;
     convertDtype(attrs.get<int32_t>("stash_type", 1), &computeType);
@@ -3081,34 +3081,50 @@ DEFINE_BUILTIN_OP_IMPORTER(SimplifiedLayerNormalization)
     auto* mean_sq_layer = N_CHECK(ctx->network()->addReduce(*x_squared, nvinfer1::ReduceOperation::kAVG, axesMask, true /*keepDims*/));
     auto* mean_sq = mean_sq_layer->getOutput(0);
 
-    // 3. add epsilon
-    nvinfer1::IConstantLayer* eps_layer = addConstantScalar(ctx, epsilon, ::ONNX_NAMESPACE::TensorProto::FLOAT);
+    // 2. Создание epsilon с правильной размерностью для broadcast
+    nvinfer1::Dims eps_dims{};
+    eps_dims.nbDims = 3;
+    eps_dims.d[0] = 1;  // batch_size
+    eps_dims.d[1] = 1;  // sequence_length
+    eps_dims.d[2] = 1;  // features
+
+    // Создаем weights для epsilon
+    nvinfer1::Weights eps_weights{};
+    eps_weights.type = nvinfer1::DataType::kFLOAT;
+    eps_weights.values = &epsilon;
+    eps_weights.count = 1;
+
+    // Создаем constant слой
+    nvinfer1::IConstantLayer* eps_layer = ctx->network()->addConstant(eps_dims, eps_weights);
     auto* eps_tensor = eps_layer->getOutput(0);
 
     auto* mean_sq_plus_eps_layer = N_CHECK(ctx->network()->addElementWise(*mean_sq, *eps_tensor, 
-        nvinfer1::ElementWiseOperation::kSUM));
+         nvinfer1::ElementWiseOperation::kSUM));
     auto* mean_sq_plus_eps = mean_sq_plus_eps_layer->getOutput(0);
 
-    // 4. Calculate RMS = Sqrt(Mean_sq_plus_eps)
+    // // 4. Calculate RMS = Sqrt(Mean_sq_plus_eps)
     auto* rms_layer = N_CHECK(ctx->network()->addUnary(*mean_sq_plus_eps, nvinfer1::UnaryOperation::kSQRT));
     auto* rms = rms_layer->getOutput(0);
 
-    // 5. Normalization X / RMS
+    // // 5. Normalization X / RMS
     auto* normalization_x_layer = N_CHECK(ctx->network()->addElementWise(*input, *rms, 
         nvinfer1::ElementWiseOperation::kDIV));
     auto* normalized_x = normalization_x_layer->getOutput(0);
 
-    // 6. Add scaled Y = Normalized_X * Scale
+    // // 6. Add scaled Y = Normalized_X * Scale
     auto* final_layer = N_CHECK(ctx->network()->addElementWise(*normalized_x, *scale, 
         nvinfer1::ElementWiseOperation::kPROD));
     
     auto* layer = final_layer;
     auto const stronglyTyped = ctx->isStronglyTyped();
+
     if (!stronglyTyped)
     {
-        layer->setComputePrecision(computeType);
+        layer->setPrecision(computeType);
     }
+
     ctx->registerLayer(layer, node);
+
     RETURN_FIRST_OUTPUT(layer, node, nodeIdx);
 } 
 
