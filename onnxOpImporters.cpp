@@ -3026,6 +3026,92 @@ DEFINE_BUILTIN_OP_IMPORTER(LayerNormalization)
     RETURN_FIRST_OUTPUT(layer, node, nodeIdx);
 }
 
+DEFINE_BUILTIN_OP_IMPORTER(SimplifiedLayerNormalization)
+{
+    auto* input = &convertToTensor(inputs.at(0), ctx);
+
+    auto dt = input->getType();
+    nvinfer1::IConstantLayer* scaleLayer;
+    nvinfer1::IConstantLayer* biasLayer;
+    if (dt == DataType::kHALF)
+    {
+        scaleLayer = addConstantScalar(ctx, static_cast<half_float::half>(1), ::ONNX_NAMESPACE::TensorProto::FLOAT16);
+        biasLayer = addConstantScalar(ctx, static_cast<half_float::half>(0), ::ONNX_NAMESPACE::TensorProto::FLOAT16);
+    }
+    else if (dt == DataType::kBF16)
+    {
+        scaleLayer = addConstantScalar(ctx, static_cast<BFloat16>(1), ::ONNX_NAMESPACE::TensorProto::BFLOAT16);
+        biasLayer = addConstantScalar(ctx, static_cast<BFloat16>(0), ::ONNX_NAMESPACE::TensorProto::BFLOAT16);
+    }
+    else
+    {
+        scaleLayer = addConstantScalar(ctx, static_cast<float>(1), ::ONNX_NAMESPACE::TensorProto::FLOAT);
+        biasLayer = addConstantScalar(ctx, static_cast<float>(0), ::ONNX_NAMESPACE::TensorProto::FLOAT);
+    }
+    auto* scale = inputs.at(1).isNullTensor() ? N_CHECK(scaleLayer->getOutput(0)) : &convertToTensor(inputs.at(1), ctx);
+    auto* bias = (inputs.size() == 3 && !inputs.at(2).isNullTensor()) ? &convertToTensor(inputs.at(2), ctx)
+                                                                      : N_CHECK(biasLayer->getOutput(0));
+
+    OnnxAttrs attrs(node, ctx);
+    float epsilon = attrs.get("epsilon", 1e-5f);
+    int32_t axis = attrs.get("axis", -1);
+    nvinfer1::DataType computeType = nvinfer1::DataType::kFLOAT;
+    convertDtype(attrs.get<int32_t>("stash_type", 1), &computeType);
+
+    int32_t const nbDims = input->getDimensions().nbDims;
+    convertAxis(axis, nbDims, node, nodeIdx);
+    uint32_t axesMask{0};
+
+    // Populate axesMask with axis values
+    for (int32_t i = axis; i < nbDims; i++)
+    {
+        axesMask |= 1 << i;
+    }
+
+    // Broadcast scale and bias to input size
+    broadcastTensors(ctx, input, scale);
+    broadcastTensors(ctx, input, bias);
+
+    // 1. calculation X_squared = input * input
+    auto* x_squared_layer = N_CHECK(ctx->network()->addElementWise(*input, *input, 
+        nvinfer1::ElementWiseOperation::kPROD));
+    auto* x_squared = x_squared_layer->getOutput(0);
+    
+    // 2. calculation Mean_of_X_squared = ReduceMean(X_squared)
+    auto* mean_sq_layer = N_CHECK(ctx->network()->addReduce(*x_squared, nvinfer1::ReduceOperation::kAVG, axesMask, true /*keepDims*/));
+    auto* mean_sq = mean_sq_layer->getOutput(0);
+
+    // 3. add epsilon
+    nvinfer1::IConstantLayer* eps_layer = addConstantScalar(ctx, epsilon, ::ONNX_NAMESPACE::TensorProto::FLOAT);
+    auto* eps_tensor = eps_layer->getOutput(0);
+
+    auto* mean_sq_plus_eps_layer = N_CHECK(ctx->network()->addElementWise(*mean_sq, *eps_tensor, 
+        nvinfer1::ElementWiseOperation::kSUM));
+    auto* mean_sq_plus_eps = mean_sq_plus_eps_layer->getOutput(0);
+
+    // 4. Calculate RMS = Sqrt(Mean_sq_plus_eps)
+    auto* rms_layer = N_CHECK(ctx->network()->addUnary(*mean_sq_plus_eps, nvinfer1::UnaryOperation::kSQRT));
+    auto* rms = rms_layer->getOutput(0);
+
+    // 5. Normalization X / RMS
+    auto* normalization_x_layer = N_CHECK(ctx->network()->addElementWise(*input, *rms, 
+        nvinfer1::ElementWiseOperation::kDIV));
+    auto* normalized_x = normalization_x_layer->getOutput(0);
+
+    // 6. Add scaled Y = Normalized_X * Scale
+    auto* final_layer = N_CHECK(ctx->network()->addElementWise(*normalized_x, *scale, 
+        nvinfer1::ElementWiseOperation::kPROD));
+    
+    auto* layer = final_layer;
+    auto const stronglyTyped = ctx->isStronglyTyped();
+    if (!stronglyTyped)
+    {
+        layer->setComputePrecision(computeType);
+    }
+    ctx->registerLayer(layer, node);
+    RETURN_FIRST_OUTPUT(layer, node, nodeIdx);
+} 
+
 DEFINE_BUILTIN_OP_IMPORTER(LeakyRelu)
 {
     OnnxAttrs attrs(node, ctx);

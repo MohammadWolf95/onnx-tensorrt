@@ -420,6 +420,12 @@ DEFINE_OP_CHECKER(LayerNormalization)
     emptyOutputChecker(ctx, node, errors, nodeIndex, 1);
 }
 
+DEFINE_OP_CHECKER(SimplifiedLayerNormalization)
+{
+    // TRT only expects one valid output. Other outputs are training artifacts that should've been removed for inference graphs.
+    emptyOutputChecker(ctx, node, errors, nodeIndex, 1);
+}
+
 DEFINE_OP_EMPTY_CHECKER(LeakyRelu)
 
 DEFINE_OP_EMPTY_CHECKER(Less)
