@@ -3106,7 +3106,12 @@ DEFINE_BUILTIN_OP_IMPORTER(SimplifiedLayerNormalization)
     auto const stronglyTyped = ctx->isStronglyTyped();
     if (!stronglyTyped)
     {
-        layer->setComputePrecision(computeType);
+        x_squared_layer->setPrecision(computeType);
+        mean_sq_layer->setPrecision(computeType);
+        mean_sq_plus_eps_layer->setPrecision(computeType);
+        rms_layer->setPrecision(computeType);
+        normalization_x_layer->setPrecision(computeType);
+        layer->setPrecision(computeType);
     }
     ctx->registerLayer(layer, node);
     RETURN_FIRST_OUTPUT(layer, node, nodeIdx);
